@@ -1,0 +1,4 @@
+*.Touhou_6
+__pycache__
+*.pyc
+models/touhou_AI.h5
