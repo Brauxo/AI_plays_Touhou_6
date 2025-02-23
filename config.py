@@ -1,7 +1,7 @@
 SCREEN_REGION = {'top': 20, 'left': 302, 'width': 962, 'height': 747}
-STATE_SIZE = (84, 84, 1)
+STATE_SIZE = (256, 256, 1)
 ACTIONS = [
-    (),                  # 0: Nothing (just 'w' will still be held)
+    ("Nothing"),         # 0: Nothing (just 'w' will still be held)
     ("up",),             # 1: Up
     ("down",),           # 2: Down
     ("left",),           # 3: Left
@@ -12,6 +12,8 @@ ACTIONS = [
     ("down", "right"),   # 8: Down + Right
     ("shift", "left"),   # 9: Shift + Left
     ("shift", "right"),  # 10: Shift + Right
+    ("shift", "up"),     # 11: Shift + Up
+    ("shift", "down"),   # 12: Shift + Down
 ]
 
 #("x",), # 12: bomb not used because it's broken

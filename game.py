@@ -16,8 +16,12 @@ class TouhouEnv:
         self.current_keys.add(SHOOT_KEY)
         # Load the Game Over template from img folder
         self.game_over_template = cv2.imread("img/game_over.png", cv2.IMREAD_GRAYSCALE)
-        if self.game_over_template is None:
-            raise FileNotFoundError("Could not load img/game_over.png. Ensure it’s in the img folder.")
+        # Load character templates
+        self.char_templates = [
+            cv2.imread(f"img/char{i}.png", cv2.IMREAD_GRAYSCALE) for i in range(1, 4)
+        ]
+        for i, template in enumerate(self.char_templates, 1):
+            self.char_templates[i-1] = cv2.resize(template, (10, 20))  # Scaled for 256x256 state
 
     def focus_game(self):
         windows = gw.getWindowsWithTitle("Touhou Scarlet Devil Land ~ The Embodiment of Scarlet Devil v1.02h")
@@ -52,39 +56,74 @@ class TouhouEnv:
 
         # Update the current state of pressed keys
         self.current_keys = new_keys | {SHOOT_KEY}  # keep the shoot key because it has no impact
-        time.sleep(1/60)  # for 60 FPS
+        time.sleep(1/60)  # for 60 FPS (single frame timing)
+
 
     def is_game_over(self, state):
-        # Resize the template to match the state size (84x84)
+        # Resize the template to match the state size (256x256)
         template = cv2.resize(self.game_over_template, (STATE_SIZE[0], STATE_SIZE[1]))
         # Perform template matching
         result = cv2.matchTemplate(state[:, :, 0], template, cv2.TM_CCOEFF_NORMED)
         _, max_val, _, _ = cv2.minMaxLoc(result)
         return max_val > 0.8  # Threshold for match
 
-    def get_reward(self, state, done):
+    def get_reward(self, prev_state, next_state, done):
         if done:
-            return -100
-        return 1  # Survivre = +1 (to be improved)
+            reward = -100
+            print(f"Reward: {reward} (Game Over)")
+            return reward
+        
+        frame = next_state[:, :, 0]
+        prev_frame = prev_state[:, :, 0]
+        diff = np.mean(np.abs(frame - prev_frame))
+        hit_penalty = -10 if diff > 50 else 0  # Flash detection (adjust threshold)
+
+        # Find player position using multiple templates
+        player_pos = None
+        max_val = 0
+        for template in self.char_templates:
+            result = cv2.matchTemplate(frame, template, cv2.TM_CCOEFF_NORMED)
+            _, val, _, loc = cv2.minMaxLoc(result)
+            if val > max_val and val > 0.6:  # Threshold for match
+                max_val = val
+                player_pos = loc
+
+        if player_pos is None:
+            # Fallback to center if player not found
+            player_x, player_y = 128, 128  # Center 
+        else:
+            player_x, player_y = player_pos[0] + 10, player_pos[1] + 20  # Center 
+
+        # Define danger zone around player 
+        y_min, y_max = max(0, player_y-30), min(256, player_y+30)
+        x_min, x_max = max(0, player_x-30), min(256, player_x+30)
+        danger_zone = frame[y_min:y_max, x_min:x_max]
+
+        # Detect projectiles
+        projectile_mask = danger_zone > 200  # Adjust threshold
+        projectile_count = np.sum(projectile_mask) / 255
+        proximity_penalty = -1 * min(projectile_count, 5)
+
+        reward = 2 + proximity_penalty + hit_penalty
+        print(f"Reward: {reward} (Base: 2, Proximity Penalty: {proximity_penalty}, Hit Penalty: {hit_penalty}, Player at ({player_x}, {player_y}), Projectiles: {projectile_count:.1f})")
+        return reward
 
     def restart_game(self):
         """Execute the sequence to start a new episode after Game Over: Esc, down, down, z, z, z, z, z, z."""
         self.reset_keys() 
-        time.sleep(1.0)  
-
-        # Sequence: Esc, down (x2), z (x6)
+        time.sleep(0.5)  
         pydirectinput.keyDown("escape")
-        time.sleep(0.2)
+        time.sleep(0.1)
         pydirectinput.keyUp("escape")
-        time.sleep(0.2)
+        time.sleep(0.1)
 
-        for _ in range(2):  # 2 'down' presses
+        for _ in range(2):  
             pydirectinput.keyDown("down")
             time.sleep(0.2)
             pydirectinput.keyUp("down")
             time.sleep(0.2)
 
-        for _ in range(6):  # 6 'z' presses
+        for _ in range(6):  
             pydirectinput.keyDown("z")
             time.sleep(0.2)
             pydirectinput.keyUp("z")
@@ -96,13 +135,15 @@ class TouhouEnv:
 
     def step(self, action_idx):
         self.perform_action(action_idx)
+        for _ in range(2):
+            time.sleep(0.05)
+            self.perform_action(action_idx)
+        prev_state = self.capture_screen()
         next_state = self.capture_screen()
         done = self.is_game_over(next_state)
-        reward = self.get_reward(next_state, done)
-        
+        reward = self.get_reward(prev_state, next_state, done)
         if done:
-            self.restart_game()  # Restart the game if Game Over detected
-        
+            self.restart_game()
         return next_state, reward, done
 
     def cleanup(self):
