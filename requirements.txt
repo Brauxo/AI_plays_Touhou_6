@@ -1,5 +1,6 @@
-pyautogui 
-opencv-python 
-tensorflow 
-numpy 
-mss
+opencv-python==4.8.0.76
+tensorflow==2.12.0
+numpy==1.24.3
+mss==9.0.1
+pydirectinput==1.0.4
+pygetwindow==0.0.9

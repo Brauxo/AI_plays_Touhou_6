@@ -6,7 +6,8 @@ from mss import mss
 import time
 import threading
 import random
-from config import SCREEN_REGION, STATE_SIZE, ACTIONS, SHOOT_KEY
+from collections import deque
+from config import SCREEN_REGION, STATE_SIZE, ACTIONS, SHOOT_KEY, FRAME_STACK_SIZE
 
 class AsyncScreenCapture:
     def __init__(self, region, state_size):
@@ -15,31 +16,28 @@ class AsyncScreenCapture:
         self.latest_frame = None
         self.lock = threading.Lock()
         self.running = True
-        
-        # Pre-allocate buffers for 256x256
-        self.screenshot_buffer = np.zeros((region['height'], region['width'], 4), dtype=np.uint8)
         self.gray_buffer = np.zeros((region['height'], region['width']), dtype=np.uint8)
-        self.resized_buffer = np.zeros(state_size[:2], dtype=np.uint8)  # (256, 256)
-        
-        # Thread-local mss instance
+        self.resized_buffer = np.zeros(state_size[:2], dtype=np.uint8)
         self.thread = threading.Thread(target=self.update)
         self.thread.daemon = True
         self.thread.start()
 
     def update(self):
-        sct = mss()  # Initialize mss in the thread
+        sct = mss()
         while self.running:
             raw = sct.grab(self.region)
             img = np.frombuffer(raw.bgra, dtype=np.uint8).reshape((raw.height, raw.width, 4))
             cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY, dst=self.gray_buffer)
-            cv2.resize(self.gray_buffer, (self.state_size[0], self.state_size[1]), 
-                      dst=self.resized_buffer, interpolation=cv2.INTER_NEAREST)
+            cv2.resize(self.gray_buffer, self.state_size[:2], dst=self.resized_buffer, interpolation=cv2.INTER_AREA)
             with self.lock:
                 self.latest_frame = self.resized_buffer.copy()
+            time.sleep(0.001)
 
     def get_frame(self):
+        while self.latest_frame is None:
+            time.sleep(0.01)
         with self.lock:
-            return self.latest_frame.copy() if self.latest_frame is not None else None
+            return self.latest_frame.copy()
 
     def stop(self):
         self.running = False
@@ -48,135 +46,106 @@ class AsyncScreenCapture:
 class TouhouEnv:
     def __init__(self):
         self.capture = AsyncScreenCapture(SCREEN_REGION, STATE_SIZE)
-        self.current_keys = set()  # Track currently pressed keys
+        self.frame_stack = deque(maxlen=FRAME_STACK_SIZE)
+        self.current_keys = set()
+        
+        self.game_over_templates = []
+
+        template_files = ["img/game_over.png", "img/game_over_2.png"]
+        
+        for file_path in template_files:
+            try:
+                self.game_over_templates.append(self._load_template(file_path, STATE_SIZE[:2]))
+                print(f"Loaded template: {file_path}")
+            except FileNotFoundError:
+                print(f"Warning: Template not found at {file_path}")
+        if not self.game_over_templates: raise RuntimeError("No game over templates found!")
+        
         self.focus_game()
-        # Start with shoot key pressed permanently
         pydirectinput.keyDown(SHOOT_KEY)
         self.current_keys.add(SHOOT_KEY)
-        # Load the Game Over template from img folder
-        self.game_over_template = self._load_template("img/game_over.png", STATE_SIZE[:2])
-        self.prev_state = None  # Store previous state
 
     def _load_template(self, path, size):
         img = cv2.imread(path, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            raise FileNotFoundError(f"Could not load {path}. Ensure it’s in the img folder.")
+        if img is None: raise FileNotFoundError(f"Could not load {path}.")
         return cv2.resize(img, size, interpolation=cv2.INTER_AREA)
+        
+    def _get_stacked_state(self):
+        return np.stack(self.frame_stack, axis=-1)
 
     def focus_game(self):
-        windows = gw.getWindowsWithTitle("Touhou Scarlet Devil Land ~ The Embodiment of Scarlet Devil v1.02h")
-        if windows:
-            try:
-                windows[0].activate()
-            except Exception:
-                pass  # Avoid focus exceptions
-            time.sleep(0.2)  # delay important
+        try:
+            windows = gw.getWindowsWithTitle("Touhou Scarlet Devil Land ~ The Embodiment of Scarlet Devil v1.02h")
+            if windows: windows[0].activate()
+            time.sleep(0.2)
+        except Exception: pass
 
-    def reset_keys(self):
-        # Release all keys except the permanent shoot key
+    def reset(self):
+        self.focus_game()
+        self.frame_stack.clear()
+        initial_frame = self.capture.get_frame()
+        for _ in range(FRAME_STACK_SIZE):
+            self.frame_stack.append(initial_frame)
+        return self._get_stacked_state()
+
+    def step(self, action_idx):
+        self.perform_action(action_idx)
+        
+        new_frame = self.capture.get_frame()
+        self.frame_stack.append(new_frame)
+        next_state = self._get_stacked_state()
+
+        done = self.is_game_over(next_state)
+        reward = -400 if done else 2
+        
+        if done:
+            self.restart_game()
+            self.frame_stack.clear()
+            fresh_frame = self.capture.get_frame()
+            for _ in range(FRAME_STACK_SIZE):
+                self.frame_stack.append(fresh_frame)
+            next_state = self._get_stacked_state()
+        
+        return next_state, reward, done
+
+    def perform_action(self, action_idx):
+        if random.random() < 0.01: self.focus_game()
+        new_keys = set(ACTIONS[action_idx])
+        keys_to_release = self.current_keys - new_keys - {SHOOT_KEY}
+        keys_to_press = new_keys - self.current_keys
+        for key in keys_to_release: pydirectinput.keyUp(key)
+        for key in keys_to_press: pydirectinput.keyDown(key)
+        self.current_keys = new_keys | {SHOOT_KEY}
+        time.sleep(0.01)
+
+    def is_game_over(self, state):
+        frame_to_check = state[:, :, 0]
+        for template in self.game_over_templates:
+            if np.max(cv2.matchTemplate(frame_to_check, template, cv2.TM_CCOEFF_NORMED)) > 0.8:
+                return True
+        return False
+
+    def restart_game(self):
+        print("\n--- GAME OVER: Executing your specific restart sequence. ---\n")
         keys_to_release = self.current_keys - {SHOOT_KEY}
         for key in keys_to_release:
             pydirectinput.keyUp(key)
-        self.current_keys = {SHOOT_KEY}  # Keep shoot key pressed
-
-    def capture_screen(self):
-        frame = self.capture.get_frame()
-        if frame is None:  # Fallback using a new mss instance
-            sct = mss()
-            screenshot = sct.grab(SCREEN_REGION)
-            img = np.array(screenshot)
-            img = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
-            frame = cv2.resize(img, (STATE_SIZE[0], STATE_SIZE[1]))
-        return np.reshape(frame, STATE_SIZE)
-
-    def perform_action(self, action_idx):
-        # Reduced focus check frequency (1% chance)
-        if random.random() < 0.01:  
-            self.focus_game()  # focus game
-        
-        # Get the new set of keys to press from ACTIONS (tuple of keys)
-        new_keys = set(ACTIONS[action_idx])  # Convert tuple to set
-        for key in self.current_keys - new_keys:
-            if key != SHOOT_KEY:
-                pydirectinput.keyUp(key)
-
-        for key in new_keys - self.current_keys:
-            pydirectinput.keyDown(key)
-
-        # Update the current state of pressed keys
-        self.current_keys = new_keys | {SHOOT_KEY}  # keep the shoot key because it has no impact
-        time.sleep(1/60)  # for 60 FPS (single frame timing)
-
-    def is_game_over(self, state):
-        # Perform template matching
-        result = cv2.matchTemplate(state[:, :, 0], self.game_over_template, cv2.TM_CCOEFF_NORMED)
-        return np.max(result) > 0.8  # Threshold for match
-
-    def get_reward(self, prev_state, next_state, done):
-        if done:
-            reward = -400
-            print(f"Reward: {reward} (Game Over)")
-            return reward
-        
-        frame = next_state[:, :, 0]
-        prev_frame = prev_state[:, :, 0] if prev_state is not None else frame  # Use current if no prev
-
-        # Simplified reward: survival + hit detection only
-        reward = 2 
-        print(f"Reward: {reward}")
-        return reward
-
-    def restart_game(self):
-        """Execute the sequence to start a new episode after Game Over: Esc, down, down, z, z, z, z, z, z."""
-        self.reset_keys() 
-        time.sleep(2.5)  # Reduced initial delay
-
-        pydirectinput.keyDown("enter")
-        time.sleep(0.2) 
-        pydirectinput.keyUp("enter")
-        time.sleep(0.2)
-    
-
-        for _ in range(4): 
-            pydirectinput.keyDown("escape")
-            time.sleep(0.5) 
-            pydirectinput.keyUp("escape")
-            time.sleep(0.5)
-
-        for _ in range(2):  
-            pydirectinput.keyDown("down")
-            time.sleep(0.2)
-            pydirectinput.keyUp("down")
-            time.sleep(0.2)
-
-        for _ in range(6):  
-            pydirectinput.keyDown("z")
-            time.sleep(0.2)
-            pydirectinput.keyUp("z")
-            time.sleep(0.2)
-
-        self.focus_game()
-        pydirectinput.keyDown(SHOOT_KEY) 
         self.current_keys = {SHOOT_KEY}
-        self.prev_state = None  
-
-    def step(self, action_idx):
-        start = time.time()
-        self.perform_action(action_idx)
-        next_state = self.capture_screen()
-        done = self.is_game_over(next_state)
-        reward = self.get_reward(self.prev_state, next_state, done)
-        if done:
-            self.restart_game()
-        self.prev_state = next_state  # Update prev_state for next step
-        elapsed = time.time() - start
-        print(f"Step time: {elapsed:.3f}s, FPS: {1/elapsed:.1f}")
-        return next_state, reward, done
+        time.sleep(2.5)
+        pydirectinput.keyDown("enter"); time.sleep(0.2); pydirectinput.keyUp("enter"); time.sleep(0.2)
+        for _ in range(4):
+            pydirectinput.keyDown("escape"); time.sleep(0.5); pydirectinput.keyUp("escape"); time.sleep(0.5)
+        for _ in range(2):
+            pydirectinput.keyDown("down"); time.sleep(0.2); pydirectinput.keyUp("down"); time.sleep(0.2)
+        for _ in range(6):
+            pydirectinput.keyDown("z"); time.sleep(0.2); pydirectinput.keyUp("z"); time.sleep(0.2)
+        self.focus_game()
+        pydirectinput.keyDown(SHOOT_KEY)
+        self.current_keys = {SHOOT_KEY}
+        time.sleep(1.5)
+        print("--- Restart Complete ---")
 
     def cleanup(self):
         self.capture.stop()
-        # Release all keys when done
         for key in self.current_keys:
             pydirectinput.keyUp(key)
-        self.current_keys.clear()
-

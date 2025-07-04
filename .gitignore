@@ -2,3 +2,4 @@
 __pycache__
 *.pyc
 models/touhou_AI.h5
+models/touhou_AI.keras

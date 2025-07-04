@@ -1,33 +1,34 @@
+# --- Screen and State Configuration ---
 SCREEN_REGION = {'top': 20, 'left': 302, 'width': 962, 'height': 747}
-STATE_SIZE = (256, 256, 1)
+FRAME_STACK_SIZE = 4  # Number of frames to stack for temporal information
+STATE_SIZE = (256, 256, FRAME_STACK_SIZE) # The final shape of our state
+
+# --- Action Space Configuration ---
 ACTIONS = [
-    ("Nothing"),         # 0: Nothing (just 'w' will still be held)
-    ("up",),             # 1: Up
-    ("down",),           # 2: Down
-    ("left",),           # 3: Left
-    ("right",),          # 4: Right      
-    ("shift", "left"),   # 9: Shift + Left
-    ("shift", "right"),  # 10: Shift + Right
-    ("shift", "up"),     # 11: Shift + Up
-    ("shift", "down"),   # 12: Shift + Down
+    ("Nothing"),         # 0
+    ("up",),             # 1
+    ("down",),           # 2
+    ("left",),           # 3
+    ("right",),          # 4
+    ("shift",),          # 5
+    ("shift", "left"),   # 6
+    ("shift", "right"),  # 7
+    ("shift", "up"),     # 8
+    ("shift", "down"),   # 9
 ]
-
-#("up", "left"),      # 5: Up + Left
-#("up", "right"),     # 6: Up + Right
-#("down", "left"),    # 7: Down + Left
-#("down", "right"),   # 8: Down + Right
-#("x",), # 12: bomb not used because it's broken
-
-
-SHOOT_KEY = "z" # Permanent key (shooting)
+SHOOT_KEY = "z"
 ACTION_SIZE = len(ACTIONS)
 
-
-LEARNING_RATE = 0.001
+# --- DQN Hyperparameters ---
+LEARNING_RATE = 0.00025
 GAMMA = 0.99
+MEMORY_SIZE = 100000
+BATCH_SIZE = 64
+
+# --- Epsilon (Exploration) Parameters ---
 EPSILON_START = 1.0
 EPSILON_MIN = 0.01
-EPSILON_DECAY = 0.995
-BATCH_SIZE = 64
-MEMORY_SIZE = 1000000
-MODEL_PATH = "models/touhou_AI.h5"
+EPSILON_DECAY = 0.9995
+
+# --- File Paths ---
+MODEL_PATH = "models/touhou_ai.keras"
